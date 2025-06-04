@@ -541,7 +541,7 @@ fn spin(this: *WebWorker) void {
 }
 
 /// This is worker.ref()/.unref() from JS (Caller thread)
-pub export fn setRef(handle: *WebWorkerLifecycleHandle, value: bool) callconv(.c) void {
+pub fn setRef(handle: *WebWorkerLifecycleHandle, value: bool) callconv(.c) void {
     if (handle.worker) |worker| {
         if (worker.hasRequestedTerminate()) {
             return;
@@ -565,7 +565,7 @@ pub fn exit(this: *WebWorker) void {
 }
 
 /// Request a terminate from any thread.
-pub export fn notifyNeedTermination(this: *WebWorker) callconv(.c) void {
+pub fn notifyNeedTermination(this: *WebWorker) callconv(.c) void {
     if (this.status.load(.acquire) == .terminated) {
         return;
     }
