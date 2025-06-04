@@ -17,6 +17,8 @@ execution_context_id: u32 = 0,
 parent_context_id: u32 = 0,
 parent: *jsc.VirtualMachine,
 
+termination_handle: *TerminationHandle = undefined,
+
 ref_count: RefCount,
 
 /// To be resolved on the Worker thread at startup, in spin().
@@ -225,8 +227,11 @@ pub fn create(
         }
     }
 
+    const termination_handle = TerminationHandle.new(undefined);
+
     const worker = WebWorker.new(.{
         .ref_count = .init(),
+        .termination_handle = termination_handle,
         .cpp_worker = cpp_worker,
         .parent = parent,
         .parent_context_id = parent_context_id,
@@ -247,6 +252,9 @@ pub fn create(
         .execArgv = if (inherit_execArgv) null else (if (execArgv_ptr) |ptr| ptr[0..execArgv_len] else &.{}),
         .preloads = preloads.items,
     });
+
+    termination_handle.worker = worker;
+
     worker.parent_poll_ref.ref(parent);
     worker.ref();
     return worker;
@@ -442,8 +450,8 @@ fn unhandledError(this: *WebWorker, _: anyerror) void {
     this.flushLogs();
 }
 
-pub export fn WebWorker__derefFromCpp(this: *WebWorker) void {
-    this.deref();
+pub export fn WebWorker__requestTermination(this: *WebWorker) void {
+    this.termination_handle.requestTermination();
 }
 
 fn spin(this: *WebWorker) void {
@@ -600,6 +608,7 @@ pub fn exitAndDeinit(this: *WebWorker) noreturn {
 
     log("[{d}] exitAndDeinit", .{this.execution_context_id});
     const cpp_worker = this.cpp_worker;
+
     var exit_code: i32 = 0;
     var globalObject: ?*jsc.JSGlobalObject = null;
     var vm_to_deinit: ?*jsc.VirtualMachine = null;
@@ -614,7 +623,7 @@ pub fn exitAndDeinit(this: *WebWorker) noreturn {
         vm_to_deinit = vm;
     }
     var arena = this.arena;
-
+    this.termination_handle.onTermination();
     WebWorker__dispatchExit(globalObject, cpp_worker, exit_code);
     if (loop) |loop_| {
         loop_.internal_loop_data.jsc_vm = null;
@@ -642,6 +651,53 @@ comptime {
     @export(&setRef, .{ .name = "WebWorker__setRef" });
     _ = WebWorker__updatePtr;
 }
+
+const TerminationHandle = struct {
+    mutex: bun.Mutex = .{},
+    worker: ?*WebWorker = null,
+    requested_terminate: std.atomic.Value(bool) = .init(false),
+
+    pub fn new(worker: *WebWorker) *TerminationHandle {
+        const handle = bun.default_allocator.create(TerminationHandle) catch bun.outOfMemory();
+        handle.worker = worker;
+        return handle;
+    }
+
+    pub fn deinit(this: *TerminationHandle) void {
+        this.worker.?.deinit();
+        this.mutex.deinit();
+        bun.default_allocator.destroy(this);
+    }
+
+    pub fn requestTermination(this: *TerminationHandle) void {
+        this.mutex.lock();
+        this.requested_terminate.store(true, .acquire);
+        const worker = this.worker orelse {
+            // the worker already terminated.
+            this.mutex.unlock();
+            this.deinit();
+            return;
+        };
+        this.worker = null;
+        worker.notifyNeedTermination();
+        this.mutex.unlock();
+        worker.deref();
+    }
+
+    pub fn onTermination(this: *TerminationHandle) void {
+        this.mutex.lock();
+        if (this.requested_terminate.swap(false, .acquire)) {
+            // we already requested to terminate, therefore this handle has
+            // already been consumed on the other thread and we are able to free
+            // it.
+            this.mutex.unlock();
+            this.deinit();
+            return;
+        }
+        this.worker = null;
+        this.mutex.unlock();
+    }
+};
 
 const std = @import("std");
 const WTFStringImpl = @import("../string.zig").WTFStringImpl;
