@@ -585,7 +585,7 @@ pub fn notifyNeedTermination(this: *WebWorker) void {
         } else {
             // For external terminate requests (e.g worker.terminate() from parent thread),
             // use VM traps system
-            vm.jsc.notifyNeedTermination();
+            vm.jsc_vm.notifyNeedTermination();
         }
     }
 }
